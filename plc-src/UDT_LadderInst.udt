@@ -1,0 +1,8 @@
+TYPE "UDT_LadderInst"
+VERSION : 0.1
+   STRUCT
+      OpCode : Int;
+      OperandIdx : Int;
+      Param : DInt;
+   END_STRUCT;
+END_TYPE

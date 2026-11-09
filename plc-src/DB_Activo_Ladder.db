@@ -1,0 +1,10 @@
+// Assign block number 11 in TIA Portal after generating this symbolic source.
+DATA_BLOCK "DB_Activo_Ladder"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR
+      Program : Array[0..199] of "UDT_LadderInst";
+   END_VAR
+BEGIN
+END_DATA_BLOCK
