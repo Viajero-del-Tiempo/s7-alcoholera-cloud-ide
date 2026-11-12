@@ -1,0 +1,19 @@
+// Assign block number 10 in TIA Portal after generating this symbolic source.
+DATA_BLOCK "DB_Comunicacion_HMI"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR
+      NewProgramReady : Bool;                        // 0.0
+      EngineEnable : Bool;                           // 0.1
+      ResetAll : Bool;                               // 0.2
+      UseVirtualInputs : Bool;                       // 0.3
+      ActiveInstructions : Int;                      // 2
+      VirtualInputs : Array[0..31] of Bool;          // 4
+      InputsState : Array[0..31] of Bool;             // 8
+      OutputsState : Array[0..31] of Bool;            // 12
+      MarkersState : Array[0..63] of Bool;            // 16
+      UploadProgram : Array[0..199] of "UDT_LadderInst"; // 24
+   END_VAR
+BEGIN
+END_DATA_BLOCK

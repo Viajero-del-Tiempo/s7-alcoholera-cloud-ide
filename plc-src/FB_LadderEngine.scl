@@ -1,0 +1,186 @@
+FUNCTION_BLOCK "FB_LadderEngine"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR
+      Outputs : Array[0..31] of Bool;
+      Markers : Array[0..63] of Bool;
+      TimersON : Array[0..15] of TON_TIME;
+      TimersOFF : Array[0..15] of TOF_TIME;
+      ActiveCount : Int;
+      ProgramValid : Bool := TRUE;
+   END_VAR
+   VAR_TEMP
+      Inputs : Array[0..31] of Bool;
+      Instruction : "UDT_LadderInst";
+      i : Int;
+      Operand : Int;
+      Param : DInt;
+      RLO : Bool;
+      Contact : Bool;
+      TimerQ : Bool;
+      Preset : Time;
+      ResetRequested : Bool;
+      LoadRequested : Bool;
+      RunProgram : Bool;
+      InstructionValid : Bool;
+   END_VAR
+BEGIN
+   IF "DB_Comunicacion_HMI".UseVirtualInputs THEN
+      FOR #i := 0 TO 31 DO
+         #Inputs[#i] := "DB_Comunicacion_HMI".VirtualInputs[#i];
+      END_FOR;
+   ELSE
+      #Inputs[0] := "START_BATCH";
+      #Inputs[1] := "STOP_RESET";
+      #Inputs[2] := "LSH_101";
+      #Inputs[3] := "LSL_101";
+      #Inputs[4] := "TSH_102"; // I1.0 is logical input 4.
+      FOR #i := 5 TO 31 DO
+         #Inputs[#i] := FALSE;
+      END_FOR;
+   END_IF;
+
+   #ResetRequested := "DB_Comunicacion_HMI".ResetAll;
+   #LoadRequested := NOT #ResetRequested AND "DB_Comunicacion_HMI".NewProgramReady;
+   IF #ResetRequested THEN
+      FOR #i := 0 TO 199 DO
+         "DB_Activo_Ladder".Program[#i].OpCode := 0;
+         "DB_Activo_Ladder".Program[#i].OperandIdx := 0;
+         "DB_Activo_Ladder".Program[#i].Param := 0;
+      END_FOR;
+      FOR #i := 0 TO 63 DO
+         #Markers[#i] := FALSE;
+      END_FOR;
+      #ActiveCount := 0;
+      #ProgramValid := TRUE;
+   ELSIF #LoadRequested THEN
+      "DB_Activo_Ladder".Program := "DB_Comunicacion_HMI".UploadProgram;
+      #ActiveCount := 0;
+      #ProgramValid := TRUE;
+      // Check the active prefix before any instruction can change an output.
+      FOR #i := 0 TO 199 DO
+         #Instruction := "DB_Activo_Ladder".Program[#i];
+         IF #Instruction.OpCode = 0 THEN
+            #ProgramValid := #ProgramValid AND (#Instruction.OperandIdx = 0)
+               AND (#Instruction.Param = 0);
+            EXIT;
+         END_IF;
+         #Operand := #Instruction.OperandIdx;
+         #Param := #Instruction.Param;
+         CASE #Instruction.OpCode OF
+            1, 2, 3, 4, 5, 6:
+               #InstructionValid := (#Param >= 0) AND (#Param <= 2)
+                  AND (#Operand >= 0) AND (#Operand <= 63)
+                  AND ((#Param = 2) OR (#Operand <= 31));
+            10, 11, 12:
+               #InstructionValid := ((#Param = 1) OR (#Param = 2))
+                  AND (#Operand >= 0) AND (#Operand <= 63)
+                  AND ((#Param = 2) OR (#Operand <= 31));
+            20, 21:
+               #InstructionValid := (#Operand >= 0) AND (#Operand <= 15) AND (#Param >= 0);
+            ELSE
+               #InstructionValid := FALSE;
+         END_CASE;
+         #ProgramValid := #ProgramValid AND #InstructionValid;
+         #ActiveCount := #ActiveCount + 1;
+      END_FOR;
+      #ProgramValid := #ProgramValid AND (#ActiveCount < 200);
+   END_IF;
+
+   #RunProgram := "DB_Comunicacion_HMI".EngineEnable AND NOT #ResetRequested AND #ProgramValid;
+   IF #LoadRequested OR NOT #RunProgram THEN
+      FOR #i := 0 TO 15 DO
+         RESET_TIMER(TIMER := #TimersON[#i]);
+         RESET_TIMER(TIMER := #TimersOFF[#i]);
+      END_FOR;
+   END_IF;
+
+   IF #RunProgram THEN
+      #RLO := FALSE;
+      FOR #i := 0 TO 199 DO
+         #Instruction := "DB_Activo_Ladder".Program[#i];
+         #Operand := #Instruction.OperandIdx;
+         #Param := #Instruction.Param;
+
+         IF (#Instruction.OpCode >= 1) AND (#Instruction.OpCode <= 6) THEN
+            CASE #Param OF
+               0: #Contact := #Inputs[#Operand];
+               1: #Contact := #Outputs[#Operand];
+               2: #Contact := #Markers[#Operand];
+            END_CASE;
+         END_IF;
+
+         CASE #Instruction.OpCode OF
+            0: // END_PROG
+               EXIT;
+            1: // LD_NO
+               #RLO := #Contact;
+            2: // LD_NC
+               #RLO := NOT #Contact;
+            3: // AND_NO
+               #RLO := #RLO AND #Contact;
+            4: // AND_NC
+               #RLO := #RLO AND NOT #Contact;
+            5: // OR_NO
+               #RLO := #RLO OR #Contact;
+            6: // OR_NC
+               #RLO := #RLO OR NOT #Contact;
+            10: // OUT
+               IF #Param = 1 THEN
+                  #Outputs[#Operand] := #RLO;
+               ELSE
+                  #Markers[#Operand] := #RLO;
+               END_IF;
+            11: // SET
+               IF #RLO THEN
+                  IF #Param = 1 THEN
+                     #Outputs[#Operand] := TRUE;
+                  ELSE
+                     #Markers[#Operand] := TRUE;
+                  END_IF;
+               END_IF;
+            12: // RESET
+               IF #RLO THEN
+                  IF #Param = 1 THEN
+                     #Outputs[#Operand] := FALSE;
+                  ELSE
+                     #Markers[#Operand] := FALSE;
+                  END_IF;
+               END_IF;
+            20: // TON
+               #Preset := DINT_TO_TIME(#Param);
+               #TimersON[#Operand](IN := #RLO, PT := #Preset, Q => #TimerQ);
+               #RLO := #TimerQ;
+            21: // TOF
+               #Preset := DINT_TO_TIME(#Param);
+               #TimersOFF[#Operand](IN := #RLO, PT := #Preset, Q => #TimerQ);
+               #RLO := #TimerQ;
+         END_CASE;
+      END_FOR;
+   ELSE
+      FOR #i := 0 TO 31 DO
+         #Outputs[#i] := FALSE;
+      END_FOR;
+   END_IF;
+
+   "P_101" := #Outputs[0];
+   "M_101" := #Outputs[1];
+   "XV_102" := #Outputs[2];
+   "P_102" := #Outputs[3];
+   "AL_101" := #Outputs[4];
+
+   FOR #i := 0 TO 31 DO
+      "DB_Comunicacion_HMI".InputsState[#i] := #Inputs[#i];
+      "DB_Comunicacion_HMI".OutputsState[#i] := #Outputs[#i];
+   END_FOR;
+   FOR #i := 0 TO 63 DO
+      "DB_Comunicacion_HMI".MarkersState[#i] := #Markers[#i];
+   END_FOR;
+   "DB_Comunicacion_HMI".ActiveInstructions := #ActiveCount;
+
+   IF #ResetRequested THEN
+      "DB_Comunicacion_HMI".ResetAll := FALSE;
+   ELSIF #LoadRequested THEN
+      "DB_Comunicacion_HMI".NewProgramReady := FALSE;
+   END_IF;
+END_FUNCTION_BLOCK
