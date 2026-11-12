@@ -17,7 +17,7 @@ Plataforma web de ingeniería industrial (IT/OT) que permite programar en calien
 [ Entorno Cloud VM (Windows Server / Workstation) ]
   ├── Sidecar Backend: Python 3.12 + FastAPI + LangGraph (Gemini) + python-snap7
   │      │
-  │      │ S7Comm Protocol (PUT/GET TCP Puerto 102 -> 192.168.0.1)
+  │      │ S7Comm Protocol (PUT/GET TCP Puerto 102 -> 192.168.56.101)
   │      ▼
   └── Entorno OT: S7-PLCSIM Advanced + TIA Portal (Ejecutando FB_LadderEngine en SCL)
 ```

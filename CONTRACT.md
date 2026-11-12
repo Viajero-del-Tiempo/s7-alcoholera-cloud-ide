@@ -20,7 +20,7 @@ Para evitar conflictos de `git merge` entre worktrees paralelos, cada agente tie
 
 ## 2. Contrato OT: Estructura Binaria y Mapa de Memoria S7 (Big-Endian)
 
-* **Parámetros de Conexión S7:** IP por defecto `192.168.0.1`, `Rack = 0`, `Slot = 1`, Puerto TCP `102`.
+* **Parámetros de Conexión S7:** IP por defecto `192.168.56.101`, `Rack = 0`, `Slot = 1`, Puerto TCP `102`.
 * **Configuración de Bloques en TIA Portal:** Todos los Data Blocks de interfaz tienen el atributo `S7_Optimized_Access := 'FALSE'`.
 
 ### 2.1 Estructura `UDT_LadderInst` (8 Bytes exactos en Big-Endian)
