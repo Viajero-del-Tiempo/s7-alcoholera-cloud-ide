@@ -500,10 +500,10 @@ function Beacon({ active }: { active: boolean }) {
 function Console3D({ enabled }: { enabled: boolean }) {
   const setInput = usePlcStore((s) => s.setInput);
   const held = useRef<number | null>(null);
-  function release(index: number) {
+  function release(index: number, immediate = false) {
     if (held.current !== index) return;
     held.current = null;
-    setInput(index, false);
+    setInput(index, false, { immediate });
   }
   return (
     <group position={[-0.4, 0, 2.6]}>
@@ -530,7 +530,7 @@ function Console3D({ enabled }: { enabled: boolean }) {
             }
           }}
           onPointerUp={() => release(index)}
-          onPointerOut={() => release(index)}
+          onPointerOut={() => release(index, true)}
         >
           <cylinderGeometry args={[0.1, 0.11, 0.08, 20]} />
           <meshStandardMaterial

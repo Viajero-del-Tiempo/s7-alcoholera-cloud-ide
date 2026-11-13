@@ -13,6 +13,9 @@ interface Message {
   role: "operator" | "assistant";
   text: string;
 }
+interface InputOptions {
+  immediate?: boolean;
+}
 interface PlcStore {
   program: LadderProgramPayload;
   deployedSignature: string | null;
@@ -43,7 +46,7 @@ interface PlcStore {
   deploy: () => Promise<void>;
   generate: (prompt: string) => Promise<void>;
   command: (patch: Partial<Command>) => Promise<void>;
-  setInput: (index: number, value: boolean) => void;
+  setInput: (index: number, value: boolean, options?: InputOptions) => void;
   setLevel: (level: number) => void;
 }
 const EMPTY_PROGRAM = PRESETS[0]!.program;
@@ -55,11 +58,17 @@ const desired = new Map<
     busy: boolean;
     attempt: number;
     request: number;
+    pulseId: number;
+    releaseRequested: boolean;
+    releaseAfter: number;
+    releaseTimer: ReturnType<typeof setTimeout> | undefined;
   }
 >();
 let lifetime: AbortController | null = null;
 let retryConnection: (() => void) | null = null;
 let epoch = 0;
+const MOMENTARY_MIN_MS = 150;
+const isMomentary = (index: number) => index === 0 || index === 1;
 
 function validTelemetry(value: unknown): value is Telemetry {
   if (typeof value !== "object" || value === null) return false;
@@ -102,7 +111,7 @@ function updateSensorStatus() {
       ([index, entry]) =>
         index !== 2 &&
         index !== 3 &&
-        (entry.busy || entry.sent !== entry.value),
+        (entry.busy || entry.sent !== entry.value || entry.releaseRequested),
     )
     .map(([index]) => index);
   const previous = usePlcStore.getState();
@@ -113,19 +122,82 @@ function updateSensorStatus() {
     usePlcStore.setState({ sensorPending: pending, inputPending });
   }
 }
-function queueInput(index: number, value: boolean) {
-  const existing = desired.get(index);
-  if (existing) existing.value = value;
-  else
+function queueInput(index: number, value: boolean, options: InputOptions = {}) {
+  if (isMomentary(index) && value) {
+    const state = usePlcStore.getState();
+    // Never queue a press to be replayed when connectivity/source returns.
+    if (!state.fresh || state.virtualInputs !== true) return;
+  }
+  if (!desired.has(index))
     desired.set(index, {
-      value,
+      value: false,
       sent: undefined,
       busy: false,
       attempt: 0,
       request: 0,
+      pulseId: 0,
+      releaseRequested: false,
+      releaseAfter: 0,
+      releaseTimer: undefined,
     });
+  const entry = desired.get(index)!;
+  if (isMomentary(index)) {
+    clearTimeout(entry.releaseTimer);
+    entry.releaseTimer = undefined;
+    if (value) {
+      if (!entry.value) {
+        entry.pulseId++;
+        entry.releaseAfter = Infinity; // The minimum starts at the true ACK.
+      }
+      entry.releaseRequested = false;
+    } else if (
+      !options.immediate &&
+      entry.value &&
+      Date.now() < entry.releaseAfter
+    ) {
+      entry.releaseRequested = true;
+      scheduleRelease(index);
+      updateSensorStatus();
+      return;
+    } else {
+      entry.pulseId++;
+      entry.releaseRequested = false;
+      entry.releaseAfter = 0;
+      if (options.immediate) entry.attempt = 0;
+    }
+  }
+  entry.value = value;
   updateSensorStatus();
   flushInputs();
+}
+function scheduleRelease(index: number) {
+  const entry = desired.get(index)!;
+  if (!entry.releaseRequested || !Number.isFinite(entry.releaseAfter)) return;
+  clearTimeout(entry.releaseTimer);
+  const pulseId = entry.pulseId;
+  const releaseEpoch = epoch;
+  entry.releaseTimer = setTimeout(
+    () => {
+      if (epoch !== releaseEpoch || entry.pulseId !== pulseId) return;
+      queueInput(index, false);
+    },
+    Math.max(0, entry.releaseAfter - Date.now()),
+  );
+}
+function releaseMomentaryKeepalive() {
+  for (const index of [0, 1]) {
+    const entry = desired.get(index);
+    if (!entry) continue;
+    const uncertain = entry.value || entry.busy || entry.sent !== false;
+    queueInput(index, false, { immediate: true });
+    if (uncertain)
+      void fetch(`${API_BASE}/api/plc/input`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index, value: false }),
+        keepalive: true,
+      }).catch(() => undefined);
+  }
 }
 function syncSensors() {
   const { level } = usePlcStore.getState();
@@ -147,6 +219,7 @@ function flushInputs() {
     const value = entry.value;
     const requestEpoch = epoch;
     const requestId = ++entry.request;
+    const pulseId = entry.pulseId;
     entry.busy = true;
     entry.attempt = Date.now();
     void api("/api/plc/input", { index, value }, lifetime.signal)
@@ -154,6 +227,10 @@ function flushInputs() {
         if (requestEpoch !== epoch) return;
         entry.sent = value;
         entry.attempt = 0;
+        if (isMomentary(index) && value && entry.pulseId === pulseId) {
+          entry.releaseAfter = Date.now() + MOMENTARY_MIN_MS;
+          scheduleRelease(index);
+        }
         if (
           sensor &&
           [2, 3].every((sensorIndex) => {
@@ -173,15 +250,14 @@ function flushInputs() {
           usePlcStore.setState({
             error: `Entrada I[${index}]: ${errorText(error)}. La liberación pendiente se reintentará.`,
           });
+        if (isMomentary(index) && value)
+          queueInput(index, false, { immediate: true });
       })
       .finally(() => {
         if (requestId !== entry.request) return;
         entry.busy = false;
         updateSensorStatus();
-        if (entry.sent !== entry.value && entry.sent === value) {
-          entry.attempt = 0;
-          flushInputs();
-        }
+        flushInputs();
       });
   }
 }
@@ -235,7 +311,8 @@ export const usePlcStore = create<PlcStore>((set, get) => ({
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
     let lastTick = performance.now();
-    const invalidate = () => {
+    const invalidate = (release = true) => {
+      if (release) releaseMomentaryKeepalive();
       epoch++;
       set({
         fresh: false,
@@ -248,7 +325,14 @@ export const usePlcStore = create<PlcStore>((set, get) => ({
         entry.attempt = 0;
         entry.busy = false;
         entry.request++;
-        if (index === 0 || index === 1) entry.value = false;
+        if (isMomentary(index)) {
+          clearTimeout(entry.releaseTimer);
+          entry.releaseTimer = undefined;
+          entry.pulseId++;
+          entry.releaseRequested = false;
+          entry.releaseAfter = 0;
+          entry.value = false;
+        }
       }
     };
     const pollHealth = async () => {
@@ -350,24 +434,17 @@ export const usePlcStore = create<PlcStore>((set, get) => ({
       for (const index of [0, 1])
         if (desired.has(index)) queueInput(index, false);
     };
-    const releaseFinal = () => {
-      for (const index of [0, 1]) {
-        if (!desired.has(index)) continue;
-        queueInput(index, false);
-        void fetch(`${API_BASE}/api/plc/input`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ index, value: false }),
-          keepalive: true,
-        }).catch(() => undefined);
-      }
+    const cancel = () => {
+      for (const index of [0, 1])
+        if (desired.has(index)) queueInput(index, false, { immediate: true });
     };
+    const releaseFinal = releaseMomentaryKeepalive;
     const visibility = () => {
-      if (document.hidden) release();
+      if (document.hidden) cancel();
     };
-    window.addEventListener("blur", release);
+    window.addEventListener("blur", cancel);
     window.addEventListener("pointerup", release);
-    window.addEventListener("pointercancel", release);
+    window.addEventListener("pointercancel", cancel);
     window.addEventListener("pagehide", releaseFinal);
     document.addEventListener("visibilitychange", visibility);
     return () => {
@@ -384,12 +461,12 @@ export const usePlcStore = create<PlcStore>((set, get) => ({
         socket.onmessage = null;
         socket.close();
       }
-      window.removeEventListener("blur", release);
+      window.removeEventListener("blur", cancel);
       window.removeEventListener("pointerup", release);
-      window.removeEventListener("pointercancel", release);
+      window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("pagehide", releaseFinal);
       document.removeEventListener("visibilitychange", visibility);
-      invalidate();
+      invalidate(false);
     };
   },
   command: async (patch) => {

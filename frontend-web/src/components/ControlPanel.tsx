@@ -28,29 +28,31 @@ function MomentaryButton({
   const heldRef = useRef(false);
   const pending = inputPending.includes(index);
   const disabled = !fresh || virtualInputs !== true || (!held && pending);
-  function release() {
+  function release(immediate = false) {
     if (heldRef.current) {
       heldRef.current = false;
       setHeld(false);
-      setInput(index, false);
+      setInput(index, false, { immediate });
     }
   }
   useEffect(() => {
-    const releaseGlobal = () => {
+    const releaseGlobal = (immediate = false) => {
       if (heldRef.current) {
         heldRef.current = false;
         setHeld(false);
-        setInput(index, false);
+        setInput(index, false, { immediate });
       }
     };
-    window.addEventListener("pointerup", releaseGlobal);
-    window.addEventListener("pointercancel", releaseGlobal);
-    window.addEventListener("blur", releaseGlobal);
+    const pointerUp = () => releaseGlobal();
+    const cancel = () => releaseGlobal(true);
+    window.addEventListener("pointerup", pointerUp);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
     return () => {
-      releaseGlobal();
-      window.removeEventListener("pointerup", releaseGlobal);
-      window.removeEventListener("pointercancel", releaseGlobal);
-      window.removeEventListener("blur", releaseGlobal);
+      cancel();
+      window.removeEventListener("pointerup", pointerUp);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
     };
   }, [index, setInput]);
   return (
@@ -58,7 +60,8 @@ function MomentaryButton({
       <button
         className={`industrial-button ${color} ${held ? "pressed" : ""}`}
         disabled={disabled}
-        aria-label={`${name} · mantener pulsado`}
+        aria-label={`${name} · pulsador momentáneo`}
+        title="Clic o mantener pulsado. Pulso normal mínimo de 150 ms tras confirmación."
         aria-pressed={held}
         onPointerDown={(e) => {
           if (e.button !== 0 || disabled) return;
@@ -68,10 +71,10 @@ function MomentaryButton({
           setHeld(true);
           setInput(index, true);
         }}
-        onPointerUp={release}
-        onPointerCancel={release}
-        onPointerLeave={release}
-        onBlur={release}
+        onPointerUp={() => release()}
+        onPointerCancel={() => release(true)}
+        onPointerLeave={() => release(true)}
+        onBlur={() => release(true)}
         onKeyDown={(e) => {
           if ((e.key === " " || e.key === "Enter") && !e.repeat && !disabled) {
             e.preventDefault();
@@ -96,7 +99,7 @@ function MomentaryButton({
           className={fresh && telemetry?.inputs[index] ? "green-text" : ""}
         >
           {pending
-            ? "Escritura pendiente…"
+            ? "Pulso / liberación pendiente…"
             : fresh
               ? `Bit observado: ${Number(telemetry?.inputs[index])}`
               : "Sin telemetría"}
